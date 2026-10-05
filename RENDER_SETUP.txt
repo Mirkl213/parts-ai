@@ -1,0 +1,32 @@
+# Parts AI Bot — Render Web Service + Telegram Worker
+
+## 1. Web Service
+Start Command:
+uvicorn app:app --host 0.0.0.0 --port $PORT
+
+## 2. Background Worker
+Create a second Render service of type Background Worker.
+
+Start Command:
+python bot.py
+
+## 3. Environment Variables
+For BOTH services add:
+
+TELEGRAM_BOT_TOKEN = token from @BotFather
+
+Recommended PartsAPI variables:
+PARTSAPI_GETARTICLECROSSES_KEY
+PARTSAPI_GETAPPLICABILITY_KEY
+PARTSAPI_TECDOCCROSSES_KEY
+PARTSAPI_VINDECODEOE_KEY
+
+The current files also contain the previously supplied test keys as fallback values.
+
+## 4. Telegram
+The Worker log should contain:
+TELEGRAM_BOT_TOKEN найден
+Подключение к Telegram...
+Telegram-бот успешно запущен и ожидает сообщения.
+
+Do not publish or share your Telegram token.
