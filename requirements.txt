@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
 python-telegram-bot>=21,<23
-pydantic
+httpx>=0.27,<1
+pydantic>=2,<3

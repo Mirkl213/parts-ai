@@ -1,87 +1,605 @@
-import os,sqlite3,asyncio,logging
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-from telegram import Update,ReplyKeyboardMarkup
-from telegram.ext import Application,CommandHandler,MessageHandler,ContextTypes,filters
+import os, sqlite3, json, asyncio, threading
+from typing import Any, Dict
 
-DB=os.getenv("DB_PATH","/tmp/parts_ai.db"); TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","").strip()
-VEH=[(1,"BMW","3 Series F30",2015,"320d","Sedan","Automatic"),(2,"Volkswagen","Golf VII",2016,"1.6 TDI","Hatchback","Manual"),(3,"Toyota","Camry XV70",2018,"2.5","Sedan","Automatic")]
-PART=[("Передние тормозные колодки BMW 3 F30","Brembo","P06049","от 85 €"),("Ступичный подшипник BMW 3 F30","FAG","713 6674 10","от 110 €"),("Масляный фильтр BMW 320d","MANN","HU 816 X","от 18 €"),("Передние тормозные колодки Golf VII","TRW","GDB1957","от 55 €"),("Масляный фильтр Toyota Camry 2.5","Toyota","90915-YZZD2","от 12 €")]
+import httpx
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes,
+    CallbackQueryHandler, MessageHandler, filters
+)
+
+DB = os.getenv("DB_PATH", "/tmp/parts_ai.db")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+PARTSAPI_URL = "https://api.partsapi.ru/"
+
+# ВНИМАНИЕ: это тестовые ключи, ранее переданные в чат.
+# Для продакшена рекомендуется перевыпустить их после публикации.
+PARTSAPI_KEYS = {
+    "getArticleCrosses": "897a08a70828ff3a21f5e437663014d1",
+    "getApplicability": "eee587e6164982e2779548362163e81d",
+    "tecdocCrosses": "b5d5d5ed612e14256e8be426eb4df68f",
+    "VINdecodeOE": "d69755043f0039590917b73e48c03aea",
+}
+
+app = FastAPI(title="Parts AI Bot")
+
+# ---------------- DB ----------------
 
 def db():
-    c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
-def init():
-    with db() as c:
-        c.execute("CREATE TABLE IF NOT EXISTS vehicles(id INTEGER PRIMARY KEY,make,model,year,engine,body,transmission)")
-        c.execute("CREATE TABLE IF NOT EXISTS parts(id INTEGER PRIMARY KEY AUTOINCREMENT,name,brand,oem,price)")
-        if not c.execute("SELECT count(*) FROM vehicles").fetchone()[0]: c.executemany("INSERT INTO vehicles VALUES(?,?,?,?,?,?,?)",VEH)
-        if not c.execute("SELECT count(*) FROM parts").fetchone()[0]: c.executemany("INSERT INTO parts(name,brand,oem,price) VALUES(?,?,?,?)",PART)
-def search(table,q):
-    with db() as c:
-        if table=="vehicles":
-            s=f"%{q}%"; return [dict(x) for x in c.execute("SELECT * FROM vehicles WHERE make LIKE ? OR model LIKE ? OR engine LIKE ? OR body LIKE ? OR CAST(year AS TEXT) LIKE ? LIMIT 10",(s,)*5)]
-        s=f"%{q}%"; return [dict(x) for x in c.execute("SELECT * FROM parts WHERE name LIKE ? OR brand LIKE ? OR oem LIKE ? LIMIT 10",(s,)*3)]
-def vin(v):
-    v=v.replace(" ","").upper()
-    if len(v)!=17:return None
-    for p,x in zip(("WBA","WVW","JT"),VEH):
-        if v.startswith(p): return dict(zip(("id","make","model","year","engine","body","transmission"),x))
-app=FastAPI(title="PARTS AI")
-class VIN(BaseModel): vin:str
-@app.on_event("startup")
-async def start():
-    init()
-    if TOKEN: asyncio.create_task(bot())
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
+    return c
 
-@app.get("/",response_class=HTMLResponse)
-async def home(): return HTML
+def init_db():
+    c = db()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS vehicles(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vin TEXT UNIQUE,
+            brand TEXT,
+            model TEXT,
+            modification TEXT,
+            date TEXT,
+            raw TEXT
+        )
+    """)
+    c.commit()
+    c.close()
+
+init_db()
+
+# ---------------- PartsAPI ----------------
+
+async def partsapi_request(method: str, **params) -> Dict[str, Any]:
+    key = PARTSAPI_KEYS[method]
+    p = dict(params)
+    p.update(method=method, key=key)
+
+    async with httpx.AsyncClient(timeout=35) as client:
+        r = await client.get(PARTSAPI_URL, params=p)
+        r.raise_for_status()
+        return r.json()
+
+def val(o, *names):
+    for n in names:
+        if o.get(n) not in (None, ""):
+            return o[n]
+    return ""
+
+async def decode_vin(vin):
+    data = await partsapi_request("VINdecodeOE", vin=vin)
+    vehicles = ((data.get("data") or {}).get("Vehicles") or [])
+    vehicle = vehicles[0] if vehicles else {}
+    attrs = vehicle.get("Attributes") or {}
+
+    result = {
+        "vin": vin,
+        "brand": val(vehicle, "Brand") or val(attrs, "brand"),
+        "model": val(vehicle, "Name") or val(attrs, "model"),
+        "modification": val(attrs, "modification") or val(vehicle, "Name"),
+        "date": val(attrs, "date"),
+        "engine": val(attrs, "engine"),
+        "body": val(attrs, "bodystyle"),
+        "market": val(attrs, "market"),
+        "catalog": val(vehicle, "Catalog") or val(attrs, "catalog"),
+        "vehicle_id": val(vehicle, "VehicleId"),
+        "raw": data,
+    }
+
+    if not result["brand"] and not result["model"]:
+        raise RuntimeError("PartsAPI не вернул автомобиль для этого VIN")
+
+    c = db()
+    c.execute("""
+        INSERT INTO vehicles(vin,brand,model,modification,date,raw)
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(vin) DO UPDATE SET
+            brand=excluded.brand,
+            model=excluded.model,
+            modification=excluded.modification,
+            date=excluded.date,
+            raw=excluded.raw
+    """, (
+        vin, result["brand"], result["model"],
+        result["modification"], result["date"],
+        json.dumps(data, ensure_ascii=False)
+    ))
+    c.commit()
+    c.close()
+
+    return result
+
+async def crosses(article, brand=""):
+    p = {"article": article}
+    if brand:
+        p["brand"] = brand
+    return await partsapi_request("getArticleCrosses", **p)
+
+async def applicability(article, car_id="", brand=""):
+    p = {"article": article}
+    if car_id:
+        p["carId"] = car_id
+    if brand:
+        p["brand"] = brand
+    return await partsapi_request("getApplicability", **p)
+
+async def tecdoc(article, brand=""):
+    p = {"article": article}
+    if brand:
+        p["brand"] = brand
+    return await partsapi_request("tecdocCrosses", **p)
+
+def compact(x, limit=3500):
+    s = json.dumps(x, ensure_ascii=False, indent=2)
+    return s if len(s) <= limit else s[:limit] + "\n..."
+
+# ---------------- FastAPI ----------------
+
+class VINRequest(BaseModel):
+    vin: str
+
+@app.get("/")
+async def root():
+    return {"ok": True, "service": "Parts AI Bot", "partsapi": True}
+
 @app.get("/api/health")
-async def health(): return {"ok":True,"telegram":bool(TOKEN)}
-@app.get("/api/vehicles")
-async def vehicles(q:str=""): return search("vehicles",q)
-@app.get("/api/parts")
-async def parts(q:str=""): return search("parts",q)
-@app.post("/api/vin")
-async def api_vin(x:VIN): return vin(x.vin) or {"error":"VIN не найден в демо-базе"}
+async def health():
+    return {
+        "ok": True,
+        "telegram_token": bool(TOKEN),
+        "partsapi_keys": {k: bool(v) for k, v in PARTSAPI_KEYS.items()}
+    }
 
-def kb(): return ReplyKeyboardMarkup([["🚗 Автомобиль","🔎 VIN"],["🔧 Запчасть","❓ Помощь"]],resize_keyboard=True)
-async def start(u:Update,c:ContextTypes.DEFAULT_TYPE):
-    c.user_data["mode"]=None
-    await u.message.reply_text("👋 PARTS AI\n\nВыберите действие или отправьте VIN.",reply_markup=kb())
-async def help_(u,c): await u.message.reply_text("Команды: /start /vin /car /part\n\nМожно написать название детали, например «колодки».",reply_markup=kb())
-async def do_vin(u,t):
-    x=vin(t)
-    if not x:return await u.message.reply_text("❌ VIN не найден. В демо доступны WBA, WVW и JT.")
-    await u.message.reply_text(f"✅ {x['make']} {x['model']}\n📅 {x['year']} · ⚙️ {x['engine']} · 🚗 {x['body']} · 🔄 {x['transmission']}",reply_markup=kb())
-async def vin_cmd(u,c):
-    if c.args:return await do_vin(u," ".join(c.args))
-    c.user_data["mode"]="vin"; await u.message.reply_text("🔎 Отправьте 17-значный VIN.")
-async def car_cmd(u,c): c.user_data["mode"]="car"; await u.message.reply_text("🚗 Например: BMW 3 Series 2015 320d")
-async def part_cmd(u,c): c.user_data["mode"]="part"; await u.message.reply_text("🔧 Напишите название детали или OEM-номер.")
-async def text(u,c):
-    t=u.message.text.strip()
-    if t=="❓ Помощь": return await help_(u,c)
-    if t=="🔎 VIN": c.user_data["mode"]="vin"; return await u.message.reply_text("🔎 Отправьте VIN.")
-    if t=="🚗 Автомобиль": return await car_cmd(u,c)
-    if t=="🔧 Запчасть": return await part_cmd(u,c)
-    m=c.user_data.get("mode")
-    if m=="vin": c.user_data["mode"]=None; return await do_vin(u,t)
-    if m=="car":
-        c.user_data["mode"]=None; xs=search("vehicles",t)
-        msg="🚗 Автомобили:\n\n"+"\n".join(f"• {x['make']} {x['model']} {x['year']} — {x['engine']}" for x in xs[:5]) if xs else "❌ Не найдено"
-        return await u.message.reply_text(msg,reply_markup=kb())
-    xs=search("parts",t)
-    msg="🔧 Запчасти:\n\n"+"\n".join(f"• {x['name']}\n  {x['brand']} | OEM {x['oem']} | {x['price']}" for x in xs[:8]) if xs else "❌ Ничего не найдено"
-    await u.message.reply_text(msg,reply_markup=kb())
-async def bot():
+@app.get("/api/vin")
+async def api_vin(vin: str = Query(..., min_length=5, max_length=30)):
     try:
-        a=Application.builder().token(TOKEN).build()
-        for h in [CommandHandler("start",start),CommandHandler("help",help_),CommandHandler("vin",vin_cmd),CommandHandler("car",car_cmd),CommandHandler("part",part_cmd)]: a.add_handler(h)
-        a.add_handler(MessageHandler(filters.TEXT&~filters.COMMAND,text))
-        await a.initialize(); await a.start(); await a.updater.start_polling()
-        while True: await asyncio.sleep(3600)
-    except Exception: logging.exception("Telegram error")
+        return await decode_vin(vin.strip().upper())
+    except Exception as e:
+        raise HTTPException(502, str(e))
 
-HTML="""<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>PARTS AI</title><style>body{font-family:Arial;max-width:760px;margin:auto;padding:20px;background:#f4f6f8}section{background:white;padding:18px;margin:12px 0;border-radius:16px}input,button{padding:13px;font-size:16px;border-radius:10px}input{width:95%}button{margin-top:7px;background:#17202a;color:white}li{margin:12px 0}</style><h1>🚗 PARTS AI</h1><section><h2>🔎 VIN</h2><input id=v placeholder='17 символов'><button onclick=v()>Определить</button><p id=vo></p></section><section><h2>🚘 Автомобиль</h2><input id=c placeholder='BMW 3 Series 2015 320d'><button onclick=c()>Найти</button><div id=co></div></section><section><h2>🔧 Запчасть</h2><input id=p placeholder='Колодки, фильтр, OEM...'><button onclick=p()>Найти</button><div id=po></div></section><p>Демо-каталог. Реальный TecDoc/поставщики подключаются через API.</p><script>const e=s=>String(s??'').replace(/[&<>]/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[x]));async function v(){let x=await(await fetch('/api/vin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vin:document.querySelector('#v').value})})).json();vo.innerHTML=x.error?'❌ '+e(x.error):`✅ ${e(x.make)} ${e(x.model)} · ${x.year} · ${e(x.engine)}`}async function c(){let x=await(await fetch('/api/vehicles?q='+encodeURIComponent(document.querySelector('#c').value))).json();co.innerHTML=x.map(a=>`<p>🚘 <b>${e(a.make)} ${e(a.model)}</b> — ${a.year}, ${e(a.engine)}</p>`).join('')||'❌ Не найдено'}async function p(){let x=await(await fetch('/api/parts?q='+encodeURIComponent(document.querySelector('#p').value))).json();po.innerHTML=x.map(a=>`<p>🔧 <b>${e(a.name)}</b><br>${e(a.brand)} · OEM ${e(a.oem)} · ${e(a.price)}</p>`).join('')||'❌ Не найдено'}</script>"""
-init()
+@app.post("/api/vin")
+async def api_vin_post(body: VINRequest):
+    try:
+        return await decode_vin(body.vin.strip().upper())
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+@app.get("/api/crosses")
+async def api_crosses(article: str = Query(...), brand: str = ""):
+    try:
+        return await crosses(article.strip(), brand.strip())
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+@app.get("/api/applicability")
+async def api_app(article: str = Query(...), car_id: str = "", brand: str = ""):
+    try:
+        return await applicability(article.strip(), car_id.strip(), brand.strip())
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+@app.get("/api/tecdoc-crosses")
+async def api_tecdoc(article: str = Query(...), brand: str = ""):
+    try:
+        return await tecdoc(article.strip(), brand.strip())
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+# ---------------- Telegram UI ----------------
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔎 Поиск запчасти", callback_data="search_part"),
+            InlineKeyboardButton("🔄 Найти аналоги", callback_data="cross_part"),
+        ],
+        [
+            InlineKeyboardButton("🚗 Поиск по VIN", callback_data="vin_search"),
+            InlineKeyboardButton("🧩 Применяемость", callback_data="applicability"),
+        ],
+        [
+            InlineKeyboardButton("📋 TecDoc-кроссы", callback_data="tecdoc"),
+        ],
+        [
+            InlineKeyboardButton("❓ Помощь", callback_data="help"),
+        ],
+    ])
+
+def back_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu")]
+    ])
+
+def result_menu(article: str):
+    # article хранится только в callback_data, поэтому ограничиваем длину
+    safe = article[:120]
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔄 Найти аналоги",
+                callback_data=f"res_cross:{safe}"
+            ),
+            InlineKeyboardButton(
+                "🧩 Применяемость",
+                callback_data=f"res_app:{safe}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📋 TecDoc-кроссы",
+                callback_data=f"res_tecdoc:{safe}"
+            )
+        ],
+        [
+            InlineKeyboardButton("🔎 Новый поиск", callback_data="search_part"),
+            InlineKeyboardButton("🏠 Меню", callback_data="menu"),
+        ]
+    ])
+
+def vin_result_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔎 Искать запчасть", callback_data="search_part"),
+            InlineKeyboardButton("🏠 Меню", callback_data="menu"),
+        ]
+    ])
+
+async def show_menu(update: Update, text="🚗 Parts AI Bot\n\nВыберите действие:"):
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            reply_markup=main_menu()
+        )
+    else:
+        await update.message.reply_text(
+            text=text,
+            reply_markup=main_menu()
+        )
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await show_menu(update)
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "❓ Как пользоваться ботом\n\n"
+        "🔎 Поиск запчасти — введите оригинальный номер детали.\n"
+        "🔄 Найти аналоги — найдёт кроссы детали.\n"
+        "🚗 Поиск по VIN — расшифрует VIN через PartsAPI.\n"
+        "🧩 Применяемость — покажет автомобили, для которых подходит деталь.\n"
+        "📋 TecDoc-кроссы — поиск кроссов по TecDoc.\n\n"
+        "Можно также использовать команды:\n"
+        "/vin VIN\n"
+        "/part НОМЕР\n"
+        "/cross НОМЕР\n"
+        "/app НОМЕР\n"
+        "/tecdoc НОМЕР"
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=back_menu())
+    else:
+        await update.message.reply_text(text, reply_markup=back_menu())
+
+async def ask_part(update, context, mode):
+    context.user_data["mode"] = mode
+    labels = {
+        "search": "🔎 Введите номер запчасти для поиска:",
+        "cross": "🔄 Введите номер запчасти для поиска аналогов:",
+        "app": "🧩 Введите номер запчасти для проверки применяемости:",
+        "tecdoc": "📋 Введите номер запчасти для поиска TecDoc-кроссов:",
+    }
+    text = labels[mode] + "\n\nНапример: <code>123456</code>"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=back_menu()
+        )
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=back_menu()
+        )
+
+async def vin_ask(update, context):
+    context.user_data["mode"] = "vin"
+    text = (
+        "🚗 <b>Поиск по VIN</b>\n\n"
+        "Введите VIN автомобиля.\n"
+        "Например:\n<code>Z8TXLCW6WCM902224</code>"
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=text, parse_mode="HTML", reply_markup=back_menu()
+        )
+    else:
+        await update.message.reply_text(
+            text=text, parse_mode="HTML", reply_markup=back_menu()
+        )
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = context.user_data.get("mode")
+    if not mode:
+        await update.message.reply_text(
+            "Выберите действие в меню 👇",
+            reply_markup=main_menu()
+        )
+        return
+
+    value = update.message.text.strip()
+    if not value:
+        return
+
+    # После получения запроса возвращаем пользователя в нейтральное состояние.
+    context.user_data["last_article"] = value
+    context.user_data["mode"] = None
+
+    try:
+        if mode == "vin":
+            await update.message.reply_text("⏳ Расшифровываю VIN...")
+            v = await decode_vin(value.upper())
+            text = (
+                "🚗 <b>Автомобиль найден</b>\n\n"
+                f"VIN: <code>{v['vin']}</code>\n"
+                f"Марка: {v['brand'] or '—'}\n"
+                f"Модель: {v['model'] or '—'}\n"
+                f"Модификация: {v['modification'] or '—'}\n"
+                f"Дата: {v['date'] or '—'}\n"
+                f"Двигатель: {v['engine'] or '—'}\n"
+                f"Кузов: {v['body'] or '—'}\n"
+                f"Рынок: {v['market'] or '—'}"
+            )
+            await update.message.reply_text(
+                text=text, parse_mode="HTML", reply_markup=vin_result_menu()
+            )
+            return
+
+        if mode == "search":
+            await update.message.reply_text("⏳ Ищу информацию по запчасти...")
+            data = await crosses(value)
+            text = "🔎 <b>Результат поиска</b>\n\n" + compact(data)
+            await update.message.reply_text(
+                text=text, parse_mode="HTML",
+                reply_markup=result_menu(value)
+            )
+            return
+
+        if mode == "cross":
+            await update.message.reply_text("⏳ Ищу аналоги...")
+            data = await crosses(value)
+            text = "🔄 <b>Аналоги / кроссы</b>\n\n" + compact(data)
+            await update.message.reply_text(
+                text=text, parse_mode="HTML",
+                reply_markup=result_menu(value)
+            )
+            return
+
+        if mode == "app":
+            await update.message.reply_text("⏳ Проверяю применяемость...")
+            data = await applicability(value)
+            text = "🧩 <b>Применяемость</b>\n\n" + compact(data)
+            await update.message.reply_text(
+                text=text, parse_mode="HTML",
+                reply_markup=result_menu(value)
+            )
+            return
+
+        if mode == "tecdoc":
+            await update.message.reply_text("⏳ Ищу TecDoc-кроссы...")
+            data = await tecdoc(value)
+            text = "📋 <b>TecDoc-кроссы</b>\n\n" + compact(data)
+            await update.message.reply_text(
+                text=text, parse_mode="HTML",
+                reply_markup=result_menu(value)
+            )
+            return
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Ошибка при обращении к PartsAPI:\n\n{e}",
+            reply_markup=main_menu()
+        )
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+
+    if data == "menu":
+        context.user_data.clear()
+        await show_menu(update)
+        return
+
+    if data == "help":
+        await help_cmd(update, context)
+        return
+
+    if data == "search_part":
+        await ask_part(update, context, "search")
+        return
+
+    if data == "cross_part":
+        await ask_part(update, context, "cross")
+        return
+
+    if data == "applicability":
+        await ask_part(update, context, "app")
+        return
+
+    if data == "tecdoc":
+        await ask_part(update, context, "tecdoc")
+        return
+
+    if data == "vin_search":
+        await vin_ask(update, context)
+        return
+
+    if data.startswith("res_cross:"):
+        article = data.split(":", 1)[1]
+        try:
+            await q.edit_message_text("⏳ Ищу аналоги...")
+            result = await crosses(article)
+            await q.message.reply_text(
+                "🔄 <b>Аналоги / кроссы</b>\n\n" + compact(result),
+                parse_mode="HTML",
+                reply_markup=result_menu(article)
+            )
+        except Exception as e:
+            await q.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+        return
+
+    if data.startswith("res_app:"):
+        article = data.split(":", 1)[1]
+        try:
+            await q.edit_message_text("⏳ Проверяю применяемость...")
+            result = await applicability(article)
+            await q.message.reply_text(
+                "🧩 <b>Применяемость</b>\n\n" + compact(result),
+                parse_mode="HTML",
+                reply_markup=result_menu(article)
+            )
+        except Exception as e:
+            await q.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+        return
+
+    if data.startswith("res_tecdoc:"):
+        article = data.split(":", 1)[1]
+        try:
+            await q.edit_message_text("⏳ Ищу TecDoc-кроссы...")
+            result = await tecdoc(article)
+            await q.message.reply_text(
+                "📋 <b>TecDoc-кроссы</b>\n\n" + compact(result),
+                parse_mode="HTML",
+                reply_markup=result_menu(article)
+            )
+        except Exception as e:
+            await q.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+        return
+
+# ---------------- Compatibility commands ----------------
+
+async def vin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await vin_ask(update, context)
+        return
+    context.user_data["mode"] = None
+    try:
+        v = await decode_vin(context.args[0].strip().upper())
+        await update.message.reply_text(
+            f"VIN: {v['vin']}\n"
+            f"Марка: {v['brand'] or '—'}\n"
+            f"Модель: {v['model'] or '—'}\n"
+            f"Модификация: {v['modification'] or '—'}\n"
+            f"Дата: {v['date'] or '—'}\n"
+            f"Двигатель: {v['engine'] or '—'}\n"
+            f"Кузов: {v['body'] or '—'}\n"
+            f"Рынок: {v['market'] or '—'}",
+            reply_markup=vin_result_menu()
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка VINdecodeOE:\n{e}", reply_markup=main_menu())
+
+async def part_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await ask_part(update, context, "search")
+        return
+    article = context.args[0]
+    try:
+        data = await crosses(article, context.args[1] if len(context.args) > 1 else "")
+        await update.message.reply_text(
+            "🔎 <b>Результат поиска</b>\n\n" + compact(data),
+            parse_mode="HTML",
+            reply_markup=result_menu(article)
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+
+async def cross_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await ask_part(update, context, "cross")
+        return
+    try:
+        data = await crosses(context.args[0])
+        await update.message.reply_text(
+            "🔄 <b>Аналоги / кроссы</b>\n\n" + compact(data),
+            parse_mode="HTML",
+            reply_markup=result_menu(context.args[0])
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+
+async def app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await ask_part(update, context, "app")
+        return
+    try:
+        data = await applicability(context.args[0])
+        await update.message.reply_text(
+            "🧩 <b>Применяемость</b>\n\n" + compact(data),
+            parse_mode="HTML",
+            reply_markup=result_menu(context.args[0])
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+
+async def tecdoc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await ask_part(update, context, "tecdoc")
+        return
+    try:
+        data = await tecdoc(context.args[0])
+        await update.message.reply_text(
+            "📋 <b>TecDoc-кроссы</b>\n\n" + compact(data),
+            parse_mode="HTML",
+            reply_markup=result_menu(context.args[0])
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=main_menu())
+
+# ---------------- Bot runner ----------------
+
+async def run_bot():
+    if not TOKEN:
+        return
+
+    b = Application.builder().token(TOKEN).build()
+
+    b.add_handler(CommandHandler("start", start_cmd))
+    b.add_handler(CommandHandler("help", help_cmd))
+    b.add_handler(CommandHandler("vin", vin_cmd))
+    b.add_handler(CommandHandler("part", part_cmd))
+    b.add_handler(CommandHandler("cross", cross_cmd))
+    b.add_handler(CommandHandler("app", app_cmd))
+    b.add_handler(CommandHandler("tecdoc", tecdoc_cmd))
+
+    b.add_handler(CallbackQueryHandler(callback_handler))
+    b.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    await b.initialize()
+    await b.start()
+    await b.updater.start_polling()
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await b.updater.stop()
+        await b.stop()
+        await b.shutdown()
+
+if __name__ == "__main__":
+    if TOKEN:
+        threading.Thread(
+            target=lambda: asyncio.run(run_bot()),
+            daemon=True
+        ).start()
+
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000"))
+    )
