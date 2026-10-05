@@ -1,4 +1,3 @@
-
 import os
 import subprocess
 import sys
@@ -8,30 +7,29 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 PARTSAPI_URL = "https://api.partsapi.ru/"
+
 PARTSAPI_KEYS = {
     "getCrosses": os.getenv("PARTSAPI_GETCROSSES_KEY", "897a08a70828ff3a21f5e437663014d1"),
+    "getArticleCrosses": os.getenv("PARTSAPI_GETARTICLECROSSES_KEY", "897a08a70828ff3a21f5e437663014d1"),
     "getApplicability": os.getenv("PARTSAPI_GETAPPLICABILITY_KEY", "eee587e6164982e2779548362163e81d"),
     "tecdocCrosses": os.getenv("PARTSAPI_TECDOCCROSSES_KEY", "b5d5d5ed612e14256e8be426eb4df68f"),
     "VINdecodeOE": os.getenv("PARTSAPI_VINDECODEOE_KEY", "d69755043f0039590917b73e48c03aea"),
 }
+
 app = FastAPI(title="Parts AI Bot")
 _bot_process = None
 
-def _start_bot():
+def start_bot():
     global _bot_process
     if not os.getenv("TELEGRAM_BOT_TOKEN"):
         print("TELEGRAM_BOT_TOKEN не задан — Telegram-бот не запущен.")
         return
-    try:
-        _bot_process = subprocess.Popen([sys.executable, "bot.py"], env=os.environ.copy())
-        print(f"Telegram-бот запущен в дочернем процессе PID={_bot_process.pid}")
-    except Exception:
-        import traceback
-        traceback.print_exc()
+    _bot_process = subprocess.Popen([sys.executable, "bot.py"], env=os.environ.copy())
+    print(f"Telegram-бот запущен в дочернем процессе PID={_bot_process.pid}")
 
 @app.on_event("startup")
 async def startup():
-    _start_bot()
+    start_bot()
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -41,16 +39,18 @@ async def shutdown():
 
 async def partsapi_request(method: str, params: Dict[str, Any]):
     key = PARTSAPI_KEYS[method]
-    data = dict(params)
-    data["key"] = key
+    query = {"method": method, "key": key}
+    query.update({k: v for k, v in params.items() if v is not None and v != ""})
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(PARTSAPI_URL, data=data)
+            r = await client.get(PARTSAPI_URL, params=query)
             r.raise_for_status()
             return r.json()
     except httpx.HTTPStatusError as e:
-        detail = f"PartsAPI HTTP {e.response.status_code}: {e.response.text[:500]}"
-        raise HTTPException(status_code=502, detail=detail)
+        raise HTTPException(
+            status_code=502,
+            detail=f"PartsAPI HTTP {e.response.status_code}: {e.response.text[:700]}",
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"PartsAPI error: {e}")
 
@@ -83,13 +83,7 @@ async def crosses(article: str):
 
 @app.post("/api/crosses")
 async def crosses_post(body: PartRequest):
-    method = "getCrosses"
-    params = {"number": body.article}
-    if body.brand:
-        # getCrossesWithBrand is not included in the supplied key set.
-        # Use getCrosses for the supplied key.
-        pass
-    return await partsapi_request(method, params)
+    return await partsapi_request("getCrosses", {"number": body.article})
 
 @app.get("/api/applicability")
 async def applicability(article: str, brand: str):
@@ -97,6 +91,4 @@ async def applicability(article: str, brand: str):
 
 @app.get("/api/tecdoc-crosses")
 async def tecdoc(article: str):
-    # PartsAPI tecdocCrosses parameters may vary by subscription.
-    # The bot sends the same number and lets the API return its validation.
     return await partsapi_request("tecdocCrosses", {"number": article})

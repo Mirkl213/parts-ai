@@ -1,12 +1,18 @@
-Исправленная версия PartsAPI.
-Web Service:
-Build: pip install -r requirements.txt
-Start: uvicorn app:app --host 0.0.0.0 --port $PORT
+Финальная схема для одного бесплатного Render Web Service.
 
-Обязательно:
+Build Command:
+pip install -r requirements.txt
+
+Start Command:
+uvicorn app:app --host 0.0.0.0 --port $PORT
+
+Environment Variable:
 TELEGRAM_BOT_TOKEN
 
-Важное изменение:
-- аналоги используют метод getCrosses с параметром number;
-- применяемость использует sku + brand;
-- VINdecodeOE использует vin.
+PartsAPI теперь вызывается правильно:
+GET https://api.partsapi.ru/?method=...&key=...&параметры...
+
+VINdecodeOE: vin
+getCrosses: number
+getApplicability: sku + brand
+tecdocCrosses: number

@@ -1,4 +1,3 @@
-
 import os
 import logging
 import httpx
@@ -18,7 +17,7 @@ KEYS = {
 }
 MODES = {}
 
-def menu():
+def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Аналоги", callback_data="cross")],
         [InlineKeyboardButton("🚗 Поиск по VIN", callback_data="vin")],
@@ -28,15 +27,15 @@ def menu():
     ])
 
 async def api_call(method, params):
-    data = dict(params)
-    data["key"] = KEYS[method]
+    query = {"method": method, "key": KEYS[method]}
+    query.update({k: v for k, v in params.items() if v})
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(URL, data=data)
+        r = await client.get(URL, params=query)
         r.raise_for_status()
         return r.json()
 
 async def start(update, context):
-    await update.message.reply_text("Привет! Выбери действие:", reply_markup=menu())
+    await update.message.reply_text("Привет! Выбери действие:", reply_markup=main_menu())
 
 async def callback(update, context):
     q = update.callback_query
@@ -45,10 +44,10 @@ async def callback(update, context):
     if action == "help":
         await q.message.reply_text(
             "Аналоги — введи номер детали.\n"
-            "VIN — введи VIN/номер рамы.\n"
-            "Применяемость — введи артикул и бренд через |, например: 12345|BOSCH.\n"
+            "VIN — введи VIN или номер рамы.\n"
+            "Применяемость — введи артикул и бренд через |.\n"
             "TecDoc-кроссы — введи номер детали.",
-            reply_markup=menu(),
+            reply_markup=main_menu(),
         )
         return
     MODES[q.from_user.id] = action
@@ -64,7 +63,7 @@ async def process(update, context):
     uid = update.effective_user.id
     mode = MODES.get(uid)
     if not mode:
-        await update.message.reply_text("Выбери действие:", reply_markup=menu())
+        await update.message.reply_text("Выбери действие:", reply_markup=main_menu())
         return
     value = update.message.text.strip()
     try:
@@ -75,18 +74,19 @@ async def process(update, context):
         elif mode == "app":
             parts = [x.strip() for x in value.split("|", 1)]
             if len(parts) != 2 or not parts[1]:
-                await update.message.reply_text("Нужно: артикул|бренд\nНапример: 12345|BOSCH")
+                await update.message.reply_text("Формат: артикул|бренд\nНапример: 12345|BOSCH")
                 return
             result = await api_call("getApplicability", {"sku": parts[0], "brand": parts[1]})
         else:
             result = await api_call("tecdocCrosses", {"number": value})
+
         text = str(result)
         if len(text) > 3900:
             text = text[:3900] + "\n…"
-        await update.message.reply_text(text, reply_markup=menu())
+        await update.message.reply_text(text, reply_markup=main_menu())
     except Exception as e:
-        log.exception("Ошибка запроса")
-        await update.message.reply_text(f"Не удалось получить ответ от PartsAPI.\nОшибка: {e}", reply_markup=menu())
+        log.exception("Ошибка PartsAPI")
+        await update.message.reply_text(f"Не удалось получить ответ от PartsAPI.\nОшибка: {e}", reply_markup=main_menu())
 
 def main():
     if not TOKEN:
@@ -94,7 +94,7 @@ def main():
     log.info("TELEGRAM_BOT_TOKEN найден (значение скрыто)")
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", lambda u, c: start(u, c)))
+    application.add_handler(CommandHandler("help", start))
     application.add_handler(CallbackQueryHandler(callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process))
     log.info("Telegram-бот успешно запущен и ожидает сообщения.")
