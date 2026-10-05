@@ -1,13 +1,24 @@
-import os, json, logging, asyncio
+import os
+import logging
 import httpx
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes,
-    CallbackQueryHandler, MessageHandler, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger("parts-ai-bot")
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 PARTSAPI_URL = "https://api.partsapi.ru/"
 KEYS = {
     "getArticleCrosses": os.getenv("PARTSAPI_GETARTICLECROSSES_KEY", "897a08a70828ff3a21f5e437663014d1"),
@@ -16,291 +27,121 @@ KEYS = {
     "VINdecodeOE": os.getenv("PARTSAPI_VINDECODEOE_KEY", "d69755043f0039590917b73e48c03aea"),
 }
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-)
-log = logging.getLogger("parts-ai-bot")
+MODES = {}
 
-async def api(method, **params):
-    p = dict(params)
-    p.update(method=method, key=KEYS[method])
-    async with httpx.AsyncClient(timeout=35) as client:
-        r = await client.get(PARTSAPI_URL, params=p)
+
+async def api_call(method: str, params: dict):
+    data = dict(params)
+    data["key"] = KEYS[method]
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(PARTSAPI_URL, data=data)
         r.raise_for_status()
         return r.json()
 
-def compact(x, limit=3500):
-    s = json.dumps(x, ensure_ascii=False, indent=2)
-    return s if len(s) <= limit else s[:limit] + "\n..."
 
-def menu():
+def main_menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔎 Поиск запчасти", callback_data="search"),
-            InlineKeyboardButton("🔄 Аналоги", callback_data="cross"),
-        ],
-        [
-            InlineKeyboardButton("🚗 Поиск по VIN", callback_data="vin"),
-            InlineKeyboardButton("🧩 Применяемость", callback_data="app"),
-        ],
-        [
-            InlineKeyboardButton("📋 TecDoc-кроссы", callback_data="tecdoc"),
-        ],
-        [
-            InlineKeyboardButton("❓ Помощь", callback_data="help"),
-        ],
+        [InlineKeyboardButton("🔎 Поиск запчасти", callback_data="part")],
+        [InlineKeyboardButton("🔄 Аналоги", callback_data="cross")],
+        [InlineKeyboardButton("🚗 Поиск по VIN", callback_data="vin")],
+        [InlineKeyboardButton("🧩 Применяемость", callback_data="app")],
+        [InlineKeyboardButton("📋 TecDoc-кроссы", callback_data="tecdoc")],
+        [InlineKeyboardButton("❓ Помощь", callback_data="help")],
     ])
 
-def back():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Главное меню", callback_data="menu")]
-    ])
 
-def result_menu(article):
-    article = article[:100]
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Аналоги", callback_data=f"cross:{article}"),
-            InlineKeyboardButton("🧩 Применяемость", callback_data=f"app:{article}"),
-        ],
-        [InlineKeyboardButton("📋 TecDoc-кроссы", callback_data=f"tecdoc:{article}")],
-        [
-            InlineKeyboardButton("🔎 Новый поиск", callback_data="search"),
-            InlineKeyboardButton("🏠 Меню", callback_data="menu"),
-        ],
-    ])
-
-async def start(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("🚗 Parts AI Bot\n\nВыберите действие:", reply_markup=menu())
-
-async def help_cmd(update, context):
-    text = (
-        "❓ <b>Помощь</b>\n\n"
-        "🔎 Поиск запчасти — введите номер детали.\n"
-        "🔄 Аналоги — поиск кроссов детали.\n"
-        "🚗 VIN — расшифровка автомобиля.\n"
-        "🧩 Применяемость — автомобили для детали.\n"
-        "📋 TecDoc — кроссы по TecDoc.\n\n"
-        "Команды: /start /vin /part /cross /app /tecdoc"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я бот для поиска автозапчастей.\nВыбери действие:",
+        reply_markup=main_menu(),
     )
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=back())
-    else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=back())
 
-async def ask(update, context, mode):
-    context.user_data["mode"] = mode
-    labels = {
-        "search": "🔎 Введите номер запчасти:",
-        "cross": "🔄 Введите номер детали для поиска аналогов:",
-        "app": "🧩 Введите номер детали для проверки применяемости:",
-        "tecdoc": "📋 Введите номер детали для TecDoc-кроссов:",
-        "vin": "🚗 Введите VIN автомобиля:",
-    }
-    text = labels[mode] + "\n\nПример: <code>123456</code>" if mode != "vin" else labels[mode] + "\n\nПример: <code>Z8TXLCW6WCM902224</code>"
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=back())
-    else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=back())
 
-async def process(update, context):
-    mode = context.user_data.get("mode")
-    if not mode:
-        await update.message.reply_text("Выберите действие:", reply_markup=menu())
-        return
-    value = update.message.text.strip()
-    context.user_data["mode"] = None
-    try:
-        if mode == "vin":
-            await update.message.reply_text("⏳ Расшифровываю VIN...")
-            data = await api("VINdecodeOE", vin=value.upper())
-            vehicles = ((data.get("data") or {}).get("Vehicles") or [])
-            v = vehicles[0] if vehicles else {}
-            a = v.get("Attributes") or {}
-            def val(*names):
-                for n in names:
-                    if v.get(n) not in (None, ""): return v[n]
-                    if a.get(n) not in (None, ""): return a[n]
-                return "—"
-            text = (
-                "🚗 <b>Автомобиль найден</b>\n\n"
-                f"VIN: <code>{value.upper()}</code>\n"
-                f"Марка: {val('Brand','brand')}\n"
-                f"Модель: {val('Name','model')}\n"
-                f"Модификация: {val('modification')}\n"
-                f"Дата: {val('date')}\n"
-                f"Двигатель: {val('engine')}\n"
-                f"Кузов: {val('bodystyle')}\n"
-                f"Рынок: {val('market')}"
-            )
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=menu())
-            return
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Выбери нужное действие в меню. Можно искать по артикулу, "
+        "получать аналоги, применяемость, TecDoc-кроссы или расшифровывать VIN.",
+        reply_markup=main_menu(),
+    )
 
-        if mode == "search":
-            await update.message.reply_text("⏳ Ищу запчасть...")
-            data = await api("getArticleCrosses", article=value)
-            title = "🔎 <b>Результат поиска</b>"
-        elif mode == "cross":
-            await update.message.reply_text("⏳ Ищу аналоги...")
-            data = await api("getArticleCrosses", article=value)
-            title = "🔄 <b>Аналоги / кроссы</b>"
-        elif mode == "app":
-            await update.message.reply_text("⏳ Проверяю применяемость...")
-            data = await api("getApplicability", article=value)
-            title = "🧩 <b>Применяемость</b>"
-        else:
-            await update.message.reply_text("⏳ Ищу TecDoc-кроссы...")
-            data = await api("tecdocCrosses", article=value)
-            title = "📋 <b>TecDoc-кроссы</b>"
 
-        await update.message.reply_text(
-            title + "\n\n" + compact(data),
-            parse_mode="HTML",
-            reply_markup=result_menu(value)
-        )
-    except Exception as e:
-        log.exception("PartsAPI error")
-        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=menu())
-
-async def callback(update, context):
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    data = q.data or ""
+    action = q.data
 
-    if data == "menu":
-        context.user_data.clear()
-        await q.edit_message_text("🚗 Parts AI Bot\n\nВыберите действие:", reply_markup=menu())
+    if action == "help":
+        await q.message.reply_text(
+            "Примеры:\n"
+            "• Аналоги: Bosch 0986479...\n"
+            "• VIN: введи 17 символов\n"
+            "• Применяемость: артикул\n"
+            "• TecDoc-кроссы: артикул",
+            reply_markup=main_menu(),
+        )
         return
-    if data == "help":
-        await help_cmd(update, context)
+
+    MODES[q.from_user.id] = action
+    prompts = {
+        "part": "Введи артикул запчасти.",
+        "cross": "Введи артикул для поиска аналогов.",
+        "vin": "Введи VIN-код (обычно 17 символов).",
+        "app": "Введи артикул для проверки применяемости.",
+        "tecdoc": "Введи артикул для TecDoc-кроссов.",
+    }
+    await q.message.reply_text(prompts[action])
+
+
+async def process_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    mode = MODES.get(user_id)
+
+    if not mode:
+        await update.message.reply_text("Выбери действие:", reply_markup=main_menu())
         return
-    if data in ("search", "cross", "app", "tecdoc", "vin"):
-        await ask(update, context, data)
-        return
 
-    if ":" in data:
-        mode, article = data.split(":", 1)
-        try:
-            await q.edit_message_text("⏳ Выполняю запрос...")
-            if mode == "cross":
-                result = await api("getArticleCrosses", article=article)
-                title = "🔄 <b>Аналоги / кроссы</b>"
-            elif mode == "app":
-                result = await api("getApplicability", article=article)
-                title = "🧩 <b>Применяемость</b>"
-            elif mode == "tecdoc":
-                result = await api("tecdocCrosses", article=article)
-                title = "📋 <b>TecDoc-кроссы</b>"
-            else:
-                return
-            await q.message.reply_text(
-                title + "\n\n" + compact(result),
-                parse_mode="HTML",
-                reply_markup=result_menu(article)
-            )
-        except Exception as e:
-            log.exception("Callback API error")
-            await q.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=menu())
-
-async def vin_cmd(update, context):
-    if context.args:
-        context.user_data["mode"] = "vin"
-        # Process-like inline call
-        try:
-            value = context.args[0].strip().upper()
-            data = await api("VINdecodeOE", vin=value)
-            vehicles = ((data.get("data") or {}).get("Vehicles") or [])
-            v = vehicles[0] if vehicles else {}
-            a = v.get("Attributes") or {}
-            def val(*names):
-                for n in names:
-                    if v.get(n) not in (None, ""): return v[n]
-                    if a.get(n) not in (None, ""): return a[n]
-                return "—"
-            await update.message.reply_text(
-                f"🚗 <b>VIN</b>\n\nVIN: <code>{value}</code>\nМарка: {val('Brand','brand')}\nМодель: {val('Name','model')}\nМодификация: {val('modification')}\nДата: {val('date')}",
-                parse_mode="HTML", reply_markup=menu()
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=menu())
-    else:
-        await ask(update, context, "vin")
-
-async def part_cmd(update, context):
-    if context.args:
-        context.user_data["mode"] = "search"
-        await process_text_value(update, context, context.args[0], "search")
-    else:
-        await ask(update, context, "search")
-
-async def cross_cmd(update, context):
-    if context.args:
-        await process_text_value(update, context, context.args[0], "cross")
-    else:
-        await ask(update, context, "cross")
-
-async def app_cmd(update, context):
-    if context.args:
-        await process_text_value(update, context, context.args[0], "app")
-    else:
-        await ask(update, context, "app")
-
-async def tecdoc_cmd(update, context):
-    if context.args:
-        await process_text_value(update, context, context.args[0], "tecdoc")
-    else:
-        await ask(update, context, "tecdoc")
-
-async def process_text_value(update, context, value, mode):
+    value = update.message.text.strip()
     try:
-        if mode in ("search", "cross"):
-            data = await api("getArticleCrosses", article=value)
-            title = "🔎 <b>Результат</b>" if mode == "search" else "🔄 <b>Аналоги</b>"
+        if mode == "vin":
+            result = await api_call("VINdecodeOE", {"vin": value})
+        elif mode == "cross":
+            result = await api_call("getArticleCrosses", {"article": value})
         elif mode == "app":
-            data = await api("getApplicability", article=value)
-            title = "🧩 <b>Применяемость</b>"
+            result = await api_call("getApplicability", {"article": value})
+        elif mode == "tecdoc":
+            result = await api_call("tecdocCrosses", {"article": value})
         else:
-            data = await api("tecdocCrosses", article=value)
-            title = "📋 <b>TecDoc-кроссы</b>"
-        await update.message.reply_text(title + "\n\n" + compact(data), parse_mode="HTML", reply_markup=result_menu(value))
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка:\n{e}", reply_markup=menu())
+            result = await api_call("getArticleCrosses", {"article": value})
 
-def validate_environment():
+        text = str(result)
+        if len(text) > 3900:
+            text = text[:3900] + "\n…"
+        await update.message.reply_text(text, reply_markup=main_menu())
+
+    except Exception as e:
+        log.exception("Ошибка запроса")
+        await update.message.reply_text(
+            f"Не удалось получить ответ от PartsAPI.\nОшибка: {e}",
+            reply_markup=main_menu(),
+        )
+
+
+def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в Environment Variables")
-    log.info("TELEGRAM_BOT_TOKEN найден (значение скрыто)")
-    log.info("PartsAPI keys: %s", {k: bool(v) for k, v in KEYS.items()})
 
-async def main():
-    validate_environment()
+    log.info("TELEGRAM_BOT_TOKEN найден (значение скрыто)")
     log.info("Подключение к Telegram...")
+
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("vin", vin_cmd))
-    application.add_handler(CommandHandler("part", part_cmd))
-    application.add_handler(CommandHandler("cross", cross_cmd))
-    application.add_handler(CommandHandler("app", app_cmd))
-    application.add_handler(CommandHandler("tecdoc", tecdoc_cmd))
-    application.add_handler(CallbackQueryHandler(callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process))
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
+    application.add_handler(CallbackQueryHandler(menu))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_text))
+
     log.info("Telegram-бот успешно запущен и ожидает сообщения.")
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+    application.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        log.exception("КРИТИЧЕСКАЯ ОШИБКА ЗАПУСКА TELEGRAM-БОТА")
-        raise
+    main()

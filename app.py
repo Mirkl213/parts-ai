@@ -1,4 +1,9 @@
-import os, sqlite3, json
+import os
+import sqlite3
+import json
+import subprocess
+import sys
+import threading
 from typing import Any, Dict
 
 import httpx
@@ -9,134 +14,143 @@ DB = os.getenv("DB_PATH", "/tmp/parts_ai.db")
 PARTSAPI_URL = "https://api.partsapi.ru/"
 
 PARTSAPI_KEYS = {
-    "getArticleCrosses": os.getenv("PARTSAPI_GETARTICLECROSSES_KEY", "897a08a70828ff3a21f5e437663014d1"),
-    "getApplicability": os.getenv("PARTSAPI_GETAPPLICABILITY_KEY", "eee587e6164982e2779548362163e81d"),
-    "tecdocCrosses": os.getenv("PARTSAPI_TECDOCCROSSES_KEY", "b5d5d5ed612e14256e8be426eb4df68f"),
-    "VINdecodeOE": os.getenv("PARTSAPI_VINDECODEOE_KEY", "d69755043f0039590917b73e48c03aea"),
+    "getArticleCrosses": os.getenv(
+        "PARTSAPI_GETARTICLECROSSES_KEY",
+        "897a08a70828ff3a21f5e437663014d1",
+    ),
+    "getApplicability": os.getenv(
+        "PARTSAPI_GETAPPLICABILITY_KEY",
+        "eee587e6164982e2779548362163e81d",
+    ),
+    "tecdocCrosses": os.getenv(
+        "PARTSAPI_TECDOCCROSSES_KEY",
+        "b5d5d5ed612e14256e8be426eb4df68f",
+    ),
+    "VINdecodeOE": os.getenv(
+        "PARTSAPI_VINDECODEOE_KEY",
+        "d69755043f0039590917b73e48c03aea",
+    ),
 }
 
 app = FastAPI(title="Parts AI Bot")
 
-def db():
-    c = sqlite3.connect(DB)
-    c.row_factory = sqlite3.Row
-    return c
+_bot_process = None
 
-def init_db():
-    c = db()
-    c.execute("""CREATE TABLE IF NOT EXISTS vehicles(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        vin TEXT UNIQUE,
-        brand TEXT,
-        model TEXT,
-        modification TEXT,
-        date TEXT,
-        raw TEXT
-    )""")
-    c.commit()
-    c.close()
 
-init_db()
+def _start_telegram_bot():
+    """Start bot.py as a child process inside the same free Web Service."""
+    global _bot_process
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("TELEGRAM_BOT_TOKEN не задан — Telegram-бот не запущен.")
+        return
 
-async def partsapi_request(method: str, **params) -> Dict[str, Any]:
-    key = PARTSAPI_KEYS[method]
-    p = dict(params)
-    p.update(method=method, key=key)
-    async with httpx.AsyncClient(timeout=35) as client:
-        r = await client.get(PARTSAPI_URL, params=p)
-        r.raise_for_status()
-        return r.json()
+    try:
+        _bot_process = subprocess.Popen(
+            [sys.executable, "bot.py"],
+            env=os.environ.copy(),
+        )
+        print(f"Telegram-бот запущен в дочернем процессе PID={_bot_process.pid}")
+    except Exception:
+        print("Не удалось запустить bot.py:")
+        import traceback
+        traceback.print_exc()
 
-def val(o, *names):
-    for n in names:
-        if o.get(n) not in (None, ""):
-            return o[n]
-    return ""
 
-async def decode_vin(vin):
-    data = await partsapi_request("VINdecodeOE", vin=vin)
-    vehicles = ((data.get("data") or {}).get("Vehicles") or [])
-    vehicle = vehicles[0] if vehicles else {}
-    attrs = vehicle.get("Attributes") or {}
-    result = {
-        "vin": vin,
-        "brand": val(vehicle, "Brand") or val(attrs, "brand"),
-        "model": val(vehicle, "Name") or val(attrs, "model"),
-        "modification": val(attrs, "modification") or val(vehicle, "Name"),
-        "date": val(attrs, "date"),
-        "engine": val(attrs, "engine"),
-        "body": val(attrs, "bodystyle"),
-        "market": val(attrs, "market"),
-        "catalog": val(vehicle, "Catalog") or val(attrs, "catalog"),
-        "vehicle_id": val(vehicle, "VehicleId"),
-        "raw": data,
-    }
-    if not result["brand"] and not result["model"]:
-        raise RuntimeError("PartsAPI не вернул автомобиль для этого VIN")
-    c = db()
-    c.execute("""INSERT INTO vehicles(vin,brand,model,modification,date,raw)
-        VALUES(?,?,?,?,?,?)
-        ON CONFLICT(vin) DO UPDATE SET
-        brand=excluded.brand, model=excluded.model,
-        modification=excluded.modification, date=excluded.date, raw=excluded.raw""",
-        (vin, result["brand"], result["model"], result["modification"],
-         result["date"], json.dumps(data, ensure_ascii=False)))
-    c.commit()
-    c.close()
-    return result
+@app.on_event("startup")
+async def startup_event():
+    _start_telegram_bot()
 
-async def crosses(article, brand=""):
-    p = {"article": article}
-    if brand: p["brand"] = brand
-    return await partsapi_request("getArticleCrosses", **p)
 
-async def applicability(article, car_id="", brand=""):
-    p = {"article": article}
-    if car_id: p["carId"] = car_id
-    if brand: p["brand"] = brand
-    return await partsapi_request("getApplicability", **p)
+@app.on_event("shutdown")
+async def shutdown_event():
+    global _bot_process
+    if _bot_process is not None and _bot_process.poll() is None:
+        _bot_process.terminate()
+        try:
+            _bot_process.wait(timeout=10)
+        except Exception:
+            _bot_process.kill()
 
-async def tecdoc(article, brand=""):
-    p = {"article": article}
-    if brand: p["brand"] = brand
-    return await partsapi_request("tecdocCrosses", **p)
+
+async def partsapi_request(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    key = PARTSAPI_KEYS.get(method)
+    if not key:
+        raise HTTPException(status_code=500, detail=f"Нет API-ключа для {method}")
+
+    payload = dict(params)
+    payload["key"] = key
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(PARTSAPI_URL, data=payload)
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"PartsAPI error: {e}")
+
 
 class VINRequest(BaseModel):
     vin: str
 
-@app.get("/")
-async def root():
-    return {"ok": True, "service": "Parts AI Bot", "partsapi": True}
 
-@app.get("/api/health")
-async def health():
+class PartRequest(BaseModel):
+    article: str
+    brand: str = ""
+
+
+@app.get("/")
+def root():
     return {
         "ok": True,
-        "partsapi_keys": {k: bool(v) for k, v in PARTSAPI_KEYS.items()},
-        "telegram": "running in separate Render Worker"
+        "service": "Parts AI Bot",
+        "partsapi": True,
+        "telegram": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
     }
 
+
+@app.get("/api/health")
+def health():
+    return {"ok": True, "service": "Parts AI Bot", "partsapi": True}
+
+
 @app.get("/api/vin")
-async def api_vin(vin: str = Query(..., min_length=5, max_length=30)):
-    try: return await decode_vin(vin.strip().upper())
-    except Exception as e: raise HTTPException(502, str(e))
+async def decode_vin(vin: str = Query(..., min_length=5)):
+    return await partsapi_request("VINdecodeOE", {"vin": vin})
+
 
 @app.post("/api/vin")
-async def api_vin_post(body: VINRequest):
-    try: return await decode_vin(body.vin.strip().upper())
-    except Exception as e: raise HTTPException(502, str(e))
+async def decode_vin_post(body: VINRequest):
+    return await partsapi_request("VINdecodeOE", {"vin": body.vin})
+
 
 @app.get("/api/crosses")
-async def api_crosses(article: str = Query(...), brand: str = ""):
-    try: return await crosses(article.strip(), brand.strip())
-    except Exception as e: raise HTTPException(502, str(e))
+async def crosses(article: str, brand: str = ""):
+    return await partsapi_request(
+        "getArticleCrosses",
+        {"article": article, "brand": brand},
+    )
+
+
+@app.post("/api/crosses")
+async def crosses_post(body: PartRequest):
+    return await partsapi_request(
+        "getArticleCrosses",
+        {"article": body.article, "brand": body.brand},
+    )
+
 
 @app.get("/api/applicability")
-async def api_app(article: str = Query(...), car_id: str = "", brand: str = ""):
-    try: return await applicability(article.strip(), car_id.strip(), brand.strip())
-    except Exception as e: raise HTTPException(502, str(e))
+async def applicability(article: str, brand: str = ""):
+    return await partsapi_request(
+        "getApplicability",
+        {"article": article, "brand": brand},
+    )
+
 
 @app.get("/api/tecdoc-crosses")
-async def api_tecdoc(article: str = Query(...), brand: str = ""):
-    try: return await tecdoc(article.strip(), brand.strip())
-    except Exception as e: raise HTTPException(502, str(e))
+async def tecdoc(article: str, brand: str = ""):
+    return await partsapi_request(
+        "tecdocCrosses",
+        {"article": article, "brand": brand},
+    )
