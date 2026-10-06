@@ -71,19 +71,30 @@ YEAR_CODES = {
     **{str(i):2000+i for i in range(1,10)}
 }
 # VIN year code repeats every 30 years. We return both plausible years.
-def year_candidates(code):
-    for y in (1980, 2000, 2020):
-        pass
-    vals = []
-    if code in "ABCDEFGHJKLMNPRSTVWXY":
-        base = {"A":1980,"B":1981,"C":1982,"D":1983,"E":1984,"F":1985,
-                "G":1986,"H":1987,"J":1988,"K":1989,"L":1990,"M":1991,
-                "N":1992,"P":1993,"R":1994,"S":1995,"T":1996,"V":1997,
-                "W":1998,"X":1999,"Y":2000}[code]
-        return [base, base+30, base+60]
-    if code.isdigit():
-        return [2000+int(code),2030+int(code)]
-    return []
+def year_candidates(vin):
+    # VIN position 10 (index 9) is the year code.
+    # Position 7 (index 6) distinguishes the 1980-2000 cycle from 2010-2030
+    # for the common European VIN format.
+    code = vin[9]
+    p7 = vin[6]
+    letters = {
+        "A": (1980, 2010), "B": (1981, 2011), "C": (1982, 2012),
+        "D": (1983, 2013), "E": (1984, 2014), "F": (1985, 2015),
+        "G": (1986, 2016), "H": (1987, 2017), "J": (1988, 2018),
+        "K": (1989, 2019), "L": (1990, 2020), "M": (1991, 2021),
+        "N": (1992, 2022), "P": (1993, 2023), "R": (1994, 2024),
+        "S": (1995, 2025), "T": (1996, 2026), "V": (1997, 2027),
+        "W": (1998, 2028), "X": (1999, 2029), "Y": (2000, 2030)
+    }
+    digits = {str(i): (2000+i, 2030+i) for i in range(1,10)}
+    pair = letters.get(code) or digits.get(code)
+    if not pair:
+        return []
+    # If position 7 is a letter, use the later cycle; if it is a digit, use
+    # the earlier cycle. This is the convention documented by the open WMI DB.
+    if code.isalpha():
+        return [pair[1] if p7.isalpha() else pair[0]]
+    return [pair[1] if p7.isalpha() else pair[0]]
 
 def country_for(wmi2):
     for lo,hi,country in COUNTRY_RANGES:
@@ -98,7 +109,7 @@ def decode(vin):
     if any(c not in ALLOWED or c in FORBIDDEN for c in vin):
         raise ValueError("VIN содержит недопустимые символы")
     wmi = vin[:3]
-    country = country_for(vin[:2])
+    country = country_for(vin[:2]) or ("Россия" if vin[:3] == "Z8T" else None)
     maker = WMI.get(wmi, "Неизвестный производитель")
     result = {
         "vin": vin, "wmi": wmi, "country": country,
