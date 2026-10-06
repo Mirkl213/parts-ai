@@ -1,53 +1,31 @@
-# Parts AI Bot — EU Free Data
+# Parts AI Bot — multi-brand / free local data
 
-Версия без PartsAPI и FAPI.
+Этот вариант не использует PartsAPI или FAPI.
 
-## Источники
+## Что добавлено
+- офлайн VIN-декодер WMI для разных марок;
+- локальный движок кроссреференсов `data/crosses.sqlite`;
+- seed-набор подтверждённых связей для Toyota 90915-YZZD1 и его замен;
+- отдельная кнопка `🔁 Кроссы / аналоги`;
+- API `GET /api/crosses?article=...`;
+- нормализация номеров: пробелы, дефисы, точки и регистр не мешают поиску.
 
-1. European/offline VIN decoder — правила на основе открытого проекта Quomation/vin-decoder (Apache-2.0).
-2. Parts/vehicle compatibility — `Sepehrmasihpour/car-parts`, SQLite `carparts.db`.
+## Важно про бесплатные данные
+Полной открытой TecDoc-аналогичной базы с десятками миллионов кроссов, которую можно законно положить в бесплатный Render-сервис, найти не удалось. Большой публичный cross-reference проект, найденный при проверке, содержит около 80 млн строк, но распространяет полный дамп как платный продукт. Поэтому мы не притворяемся, что используем его бесплатно.
 
-База carparts.db скачивается при старте, если её ещё нет.
+Вместо этого бот построен так, чтобы локальная база кроссов расширялась CSV-файлами без изменения кода. Текущий seed — только подтверждённые связи для тестового номера `90915-YZZD1`.
 
 ## Render
-
-Build:
+Build Command:
 `pip install -r requirements.txt`
 
-Start:
+Start Command:
 `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
 Environment:
 `TELEGRAM_BOT_TOKEN`
 
-## Что умеет
-
-- VIN европейского формата: WMI, страна, производитель, год-кандидаты, завод, серийный номер.
-- Для VW/Audi/SEAT/Škoda с европейским `ZZZ` — дополнительные модели по открытым правилам.
-- Поиск номера детали в открытой SQLite-БД.
-- Поиск деталей по марке/модели.
-
-## Ограничение
-
-Это не TecDoc и не полноценная лицензированная OEM-база. Открытая carparts.db содержит связи автомобиль ↔ деталь, но не является полноценной базой aftermarket-кроссов. Поэтому бот не будет выдумывать аналоги.
-
-## Следующий этап
-
-Можно отдельно добавить второй легальный открытый источник именно для OEM/aftermarket cross-reference, если найдём датасет с разрешённым распространением.
-
-## Важное исправление v2
-
-- Подключена открытая WMI-база `Wal33D/nhtsa-vin-decoder` (MIT).
-- Исправлена логика года по позиции 7/10 VIN.
-- Добавлен `Z8T = Mitsubishi` для европейского производства.
-- Для VIN `Z8TXLCW6WCM902224` код года `C` с буквенной позицией 7 трактуется как 2012, а не как 1982.
-
-
-## v3
-Исправлена ошибка `string index out of range`: функция определения года теперь получает полный VIN и дополнительно проверяет длину входных данных.
-
-## v4 — Multi-brand VIN
-
-Основной VIN-источник теперь — открытый `nhtsa-vin-decoder` с WMI-базой
-2,015+ кодов производителей. Локальная таблица используется только как
-fallback. Платные VIN API не используются.
+## Sources / attribution
+- NHTSA vPIC: https://vpic.nhtsa.dot.gov/api/
+- Open vehicle dataset: https://github.com/vehiclesdb/vehiclesdb
+- Cross-reference seed was assembled from public cross-reference pages used only as verification references; it is not presented as a complete catalog.

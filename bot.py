@@ -3,6 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from eu_vin import decode
 from app import find_part, vehicle_parts
+from cross_db import find as find_crosses
 
 TOKEN=os.getenv("TELEGRAM_BOT_TOKEN")
 MODES={}
@@ -12,6 +13,7 @@ def menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚗 VIN Европа", callback_data="vin")],
         [InlineKeyboardButton("🔎 Найти деталь", callback_data="part")],
+        [InlineKeyboardButton("🔁 Кроссы / аналоги", callback_data="cross")],
         [InlineKeyboardButton("🚘 Детали по авто", callback_data="vehicle")],
         [InlineKeyboardButton("❓ Помощь", callback_data="help")]
     ])
@@ -34,7 +36,7 @@ async def callback(update, context):
             "Важно: это не TecDoc и не лицензированная OEM-база.", reply_markup=menu())
         return
     MODES[q.from_user.id]=q.data
-    prompts={"vin":"Введи VIN из 17 символов.","part":"Введи номер детали.","vehicle":"Введи марку или модель, например: Golf, A4, Octavia."}
+    prompts={"vin":"Введи VIN из 17 символов.","part":"Введи номер детали.","vehicle":"Введи марку или модель, например: Golf, A4, Octavia.","cross":"Введи OEM или артикул, например: 90915-YZZD1."}
     await q.message.reply_text(prompts[q.data])
 
 async def process(update, context):
@@ -69,6 +71,20 @@ async def process(update, context):
                     if x["name"]: line+=f" — {x['name']}"
                     if x["vehicle"]: line+=f" → {x['vehicle']}"
                     lines.append(line)
+                text="\n".join(lines)
+        elif mode=="cross":
+            rows=find_crosses(value)
+            if not rows:
+                text="🔁 Для этого номера пока нет записи в нашей открытой локальной базе кроссов."
+            else:
+                lines=[f"🔁 Кроссы для: {value}"]
+                seen=set()
+                for x in rows:
+                    key=(x["brand"],x["article"])
+                    if key in seen: continue
+                    seen.add(key)
+                    lines.append(f"• {x['brand']}: {x['article']}")
+                lines.append("\n⚠️ Кроссреференс не заменяет проверку применяемости по авто/двигателю.")
                 text="\n".join(lines)
         else:
             rows=vehicle_parts(value)

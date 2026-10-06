@@ -4,6 +4,7 @@ import httpx
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from eu_vin import decode
+from cross_db import init as init_cross_db, find as find_crosses
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -42,6 +43,7 @@ def start_bot():
 @app.on_event("startup")
 async def startup():
     await ensure_open_db()
+    init_cross_db()
     start_bot()
 
 @app.on_event("shutdown")
@@ -52,6 +54,11 @@ async def shutdown():
 @app.get("/")
 def root():
     return {"ok": True, "service": "Parts AI Bot — EU Free Data", "open_db": db_ready()}
+
+
+@app.get("/api/crosses")
+def crosses(article: str = Query(..., min_length=1)):
+    return {"article": article, "crosses": find_crosses(article)}
 
 @app.get("/api/health")
 def health():
