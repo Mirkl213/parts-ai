@@ -68,7 +68,7 @@ async def process(update, context):
     value = update.message.text.strip()
     try:
         if mode == "cross":
-            result = await api_call("getCrosses", {"number": value})
+            result = await api_call("tecdocCrosses", {"number": value})
         elif mode == "vin":
             result = await api_call("VINdecodeOE", {"vin": value})
         elif mode == "app":
