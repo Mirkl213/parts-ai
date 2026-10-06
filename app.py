@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from eu_vin import decode
 from cross_db import init as init_cross_db, find as find_crosses
+from fitment import check_applicability
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -55,6 +56,16 @@ def root():
 @app.get("/api/crosses")
 def crosses(article: str = Query(..., min_length=1)):
     return {"article": article, "crosses": find_crosses(article)}
+
+@app.get("/api/applicability")
+def applicability(
+    article: str = Query(..., min_length=1),
+    manufacturer: str = Query("", min_length=0),
+    model: str = Query("", min_length=0),
+    year: int | None = Query(None),
+):
+    return check_applicability(article, manufacturer, model, year)
+
 
 @app.get("/api/health")
 def health():

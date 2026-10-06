@@ -38,3 +38,13 @@ Environment:
 
 ## v7
 Telegram polling теперь запускается внутри FastAPI-процесса через async lifecycle. Отдельный subprocess для bot.py удалён, чтобы Render не оставлял второй getUpdates-процесс и Telegram Conflict.
+
+
+## Applicability module
+- Added `fitment.py`.
+- New Telegram button: `✅ Применяемость`.
+- Flow: VIN → article → conservative fitment result.
+- New API: `GET /api/applicability?article=...&manufacturer=...&model=...&year=...`.
+- A result is confirmed only when the local open `carparts.db` explicitly links the part to a matching vehicle model.
+- Cross-reference rows are never treated as proof of applicability.
+- If the local dataset has no evidence, the bot says `НЕ ПОДТВЕРЖДЕНО`.

@@ -4,6 +4,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from eu_vin import decode
 from app import find_part, vehicle_parts
 from cross_db import find as find_crosses
+from fitment import check_applicability
 
 TOKEN=os.getenv("TELEGRAM_BOT_TOKEN")
 MODES={}
@@ -15,6 +16,7 @@ def menu():
         [InlineKeyboardButton("🚗 VIN Европа", callback_data="vin")],
         [InlineKeyboardButton("🔎 Найти деталь", callback_data="part")],
         [InlineKeyboardButton("🔁 Кроссы / аналоги", callback_data="cross")],
+        [InlineKeyboardButton("✅ Применяемость", callback_data="fitment")],
         [InlineKeyboardButton("🚘 Детали по авто", callback_data="vehicle")],
         [InlineKeyboardButton("❓ Помощь", callback_data="help")]
     ])
@@ -37,7 +39,10 @@ async def callback(update, context):
             "Важно: это не TecDoc и не лицензированная OEM-база.", reply_markup=menu())
         return
     MODES[q.from_user.id]=q.data
-    prompts={"vin":"Введи VIN из 17 символов.","part":"Введи номер детали.","vehicle":"Введи марку или модель, например: Golf, A4, Octavia.","cross":"Введи OEM или артикул, например: 90915-YZZD1."}
+    if q.data == "fitment":
+        MODES[q.from_user.id] = {"mode": "fitment", "step": "vin"}
+
+    prompts={"vin":"Введи VIN из 17 символов.","part":"Введи номер детали.","vehicle":"Введи марку или модель, например: Golf, A4, Octavia.","cross":"Введи OEM или артикул, например: 90915-YZZD1.","fitment":"Введи VIN из 17 символов."}
     await q.message.reply_text(prompts[q.data])
 
 async def process(update, context):
@@ -47,7 +52,50 @@ async def process(update, context):
     if not mode:
         await update.message.reply_text("Выбери действие:",reply_markup=menu()); return
     try:
-        if mode=="vin":
+        # Applicability is a two-step flow: VIN, then article.
+        if isinstance(mode, dict) and mode.get("mode") == "fitment":
+            if mode.get("step") == "vin":
+                r = decode(value)
+                mode["vin"] = r
+                mode["step"] = "article"
+                MODES[uid] = mode
+                await update.message.reply_text(
+                    "🚗 Автомобиль определён:\n"
+                    f"• {r['manufacturer']}\n"
+                    f"• {r.get('model') or 'Модель не определена'}\n"
+                    f"• Модельный год: {', '.join(map(str, r.get('year_candidates') or [])) or 'не определён'}\n\n"
+                    "Теперь введи номер детали для проверки применяемости."
+                )
+                return
+            r = mode["vin"]
+            year = (r.get("year_candidates") or [None])[0]
+            result = check_applicability(
+                value, r.get("manufacturer"), r.get("model"), year
+            )
+            if result["status"] == "confirmed_by_local_db":
+                lines = [
+                    f"✅ Применяемость: {value}",
+                    f"• Авто: {r.get('manufacturer')}",
+                    f"• Модель: {r.get('model') or 'не определена'}",
+                    f"• Модельный год: {year or 'не определён'}",
+                    "• Статус: подтверждено локальной БД",
+                ]
+                for x in result["matched_vehicles"][:10]:
+                    lines.append(f"• {x['vehicle']}")
+                lines.append("\n⚠️ Это подтверждение только по нашей открытой локальной БД, не полная TecDoc/OEM-гарантия.")
+            else:
+                lines = [
+                    f"⚠️ Применяемость: {value}",
+                    f"• Авто: {r.get('manufacturer')}",
+                    f"• Модель: {r.get('model') or 'не определена'}",
+                    f"• Модельный год: {year or 'не определён'}",
+                    "• Статус: НЕ ПОДТВЕРЖДЕНО",
+                    f"• Причина: {result['reason']}",
+                    "\nКросс детали сам по себе не считается подтверждением применяемости."
+                ]
+            MODES.pop(uid, None)
+            text="\n".join(lines)
+        elif mode=="vin":
             r=decode(value)
             lines=["🚗 VIN","• Производитель: "+r["manufacturer"]]
             if r["country"]: lines.append("• Страна: "+r["country"])
