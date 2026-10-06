@@ -111,12 +111,31 @@ def decode(vin):
     if any(c not in ALLOWED or c in FORBIDDEN for c in vin):
         raise ValueError("VIN содержит недопустимые символы")
     wmi = vin[:3]
-    country = country_for(vin[:2]) or ("Россия" if vin[:3] == "Z8T" else None)
-    maker = WMI.get(wmi, "Неизвестный производитель")
+    maker = None
+    package_country = None
+    package_region = None
+    package_year = None
+    try:
+        from python.wmi_database import WMIDatabase
+        maker = WMIDatabase.get_manufacturer(vin)
+        package_country = WMIDatabase.get_country(vin)
+        package_region = WMIDatabase.get_region(vin[0])
+        package_year = WMIDatabase.get_year(vin)
+    except Exception:
+        pass
+
+    maker = maker or WMI.get(wmi, "Неизвестный производитель")
+    if wmi == "Z8T":
+        maker = "Mitsubishi"
+        package_country = package_country or "Россия"
+
+    country = package_country or country_for(vin[:2])
+    region = package_region or ("Европа" if vin[0] in "STUVWXYZ" else None)
+
     result = {
         "vin": vin, "wmi": wmi, "country": country,
-        "manufacturer": maker, "region": "Европа" if vin[0] in "STUVWXYZ" else None,
-        "year_candidates": year_candidates(vin),
+        "manufacturer": maker, "region": region,
+        "year_candidates": [package_year] if package_year else year_candidates(vin),
         "plant_code": vin[10], "serial": vin[11:],
         "descriptor": vin[3:8], "model": None
     }
