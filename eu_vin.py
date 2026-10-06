@@ -72,6 +72,8 @@ YEAR_CODES = {
 }
 # VIN year code repeats every 30 years. We return both plausible years.
 def year_candidates(vin):
+    if not isinstance(vin, str) or len(vin) < 10:
+        return []
     # VIN position 10 (index 9) is the year code.
     # Position 7 (index 6) distinguishes the 1980-2000 cycle from 2010-2030
     # for the common European VIN format.
@@ -114,7 +116,7 @@ def decode(vin):
     result = {
         "vin": vin, "wmi": wmi, "country": country,
         "manufacturer": maker, "region": "Европа" if vin[0] in "STUVWXYZ" else None,
-        "year_candidates": year_candidates(vin[9]),
+        "year_candidates": year_candidates(vin),
         "plant_code": vin[10], "serial": vin[11:],
         "descriptor": vin[3:8], "model": None
     }
