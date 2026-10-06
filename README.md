@@ -1,48 +1,36 @@
-# Parts AI Bot — лучший бесплатный вариант
+# Parts AI Bot — EU Free Data
 
-Эта версия НЕ использует PartsAPI, FAPI или какие-либо ранее переданные пользователем ключи.
+Версия без PartsAPI и FAPI.
 
 ## Источники
 
-### 1. NHTSA vPIC
-Бесплатный государственный API для VIN. Регистрация и API-ключ не нужны.
-Он возвращает данные автомобиля по VIN. NHTSA также публикует локальные базы VIN-decoding.
-https://vpic.nhtsa.dot.gov/api/
+1. European/offline VIN decoder — правила на основе открытого проекта Quomation/vin-decoder (Apache-2.0).
+2. Parts/vehicle compatibility — `Sepehrmasihpour/car-parts`, SQLite `carparts.db`.
 
-### 2. Open Car Parts SQLite
-В проекте предусмотрена загрузка/использование открытой SQLite-базы:
-https://github.com/Sepehrmasihpour/car-parts
-
-Её модель данных: car_models, car_parts, car_part_models.
-Это НЕ TecDoc и не мировая база аналогов. Поэтому бот честно сообщает,
-когда кросс отсутствует.
-
-## Архитектура
-
-Telegram -> Render Web Service -> bot.py
-                         |
-                         +-> NHTSA vPIC (VIN)
-                         |
-                         +-> SQLite (кроссы/детали)
-
-## Environment Variables
-
-Только:
-TELEGRAM_BOT_TOKEN
-
-Никаких PartsAPI/FAPI ключей не требуется.
+База carparts.db скачивается при старте, если её ещё нет.
 
 ## Render
 
-Build Command:
-pip install -r requirements.txt
+Build:
+`pip install -r requirements.txt`
 
-Start Command:
-uvicorn app:app --host 0.0.0.0 --port $PORT
+Start:
+`uvicorn app:app --host 0.0.0.0 --port $PORT`
 
-## Важное ограничение
+Environment:
+`TELEGRAM_BOT_TOKEN`
 
-Открытой бесплатной базы уровня TecDoc на 2026 год я не нашёл.
-Большие cross-reference базы существуют, но это не означает, что их можно
-свободно использовать/встраивать без ограничений. Поэтому эта версия не
-притворяется TecDoc и использует только открытые источники.
+## Что умеет
+
+- VIN европейского формата: WMI, страна, производитель, год-кандидаты, завод, серийный номер.
+- Для VW/Audi/SEAT/Škoda с европейским `ZZZ` — дополнительные модели по открытым правилам.
+- Поиск номера детали в открытой SQLite-БД.
+- Поиск деталей по марке/модели.
+
+## Ограничение
+
+Это не TecDoc и не полноценная лицензированная OEM-база. Открытая carparts.db содержит связи автомобиль ↔ деталь, но не является полноценной базой aftermarket-кроссов. Поэтому бот не будет выдумывать аналоги.
+
+## Следующий этап
+
+Можно отдельно добавить второй легальный открытый источник именно для OEM/aftermarket cross-reference, если найдём датасет с разрешённым распространением.
