@@ -7,6 +7,7 @@ from cross_db import find as find_crosses
 
 TOKEN=os.getenv("TELEGRAM_BOT_TOKEN")
 MODES={}
+telegram_app=None
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 def menu():
@@ -52,7 +53,7 @@ async def process(update, context):
             if r["country"]: lines.append("• Страна: "+r["country"])
             if r["model"]: lines.append("• Модель: "+r["model"])
             lines += ["• Регион: "+str(r["region"] or "не определён"),
-                      "• Год-коды: "+", ".join(map(str,r["year_candidates"])),
+                      "• Модельный год: "+", ".join(map(str,r["year_candidates"])),
                       "• WMI: "+r["wmi"], "• Завод: "+r["plant_code"],
                       "• Серийный номер: "+r["serial"]]
             text="\n".join(lines)
@@ -102,6 +103,34 @@ async def process(update, context):
     except Exception as e:
         logging.exception("bot error")
         await update.message.reply_text("Ошибка: "+str(e),reply_markup=menu())
+
+async def start_telegram():
+    global telegram_app
+    if not TOKEN:
+        logging.warning("TELEGRAM_BOT_TOKEN не задан — Telegram polling отключён")
+        return
+    telegram_app=Application.builder().token(TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start",start))
+    telegram_app.add_handler(CommandHandler("help",start))
+    telegram_app.add_handler(CallbackQueryHandler(callback))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,process))
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling(drop_pending_updates=True)
+    logging.info("Telegram polling started inside FastAPI process")
+
+async def stop_telegram():
+    global telegram_app
+    if telegram_app is None:
+        return
+    try:
+        if telegram_app.updater and telegram_app.updater.running:
+            await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+    finally:
+        telegram_app=None
+        logging.info("Telegram polling stopped")
 
 def main():
     if not TOKEN: raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")

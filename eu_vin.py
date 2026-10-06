@@ -72,37 +72,55 @@ YEAR_CODES = {
 }
 # VIN year code repeats every 30 years. We return both plausible years.
 def year_candidates(vin):
-    if not isinstance(vin, str) or len(vin) < 10:
+    """Return the model year with manufacturer-aware handling for modern VW VINs."""
+    if not vin or len(vin) < 10:
         return []
-    # VIN position 10 (index 9) is the year code.
-    # Position 7 (index 6) distinguishes the 1980-2000 cycle from 2010-2030
-    # for the common European VIN format.
-    code = vin[9]
-    p7 = vin[6]
-    letters = {
-        "A": (1980, 2010), "B": (1981, 2011), "C": (1982, 2012),
-        "D": (1983, 2013), "E": (1984, 2014), "F": (1985, 2015),
-        "G": (1986, 2016), "H": (1987, 2017), "J": (1988, 2018),
-        "K": (1989, 2019), "L": (1990, 2020), "M": (1991, 2021),
-        "N": (1992, 2022), "P": (1993, 2023), "R": (1994, 2024),
-        "S": (1995, 2025), "T": (1996, 2026), "V": (1997, 2027),
-        "W": (1998, 2028), "X": (1999, 2029), "Y": (2000, 2030)
+
+    code = vin[9].upper()
+    wmi = vin[:3].upper()
+
+    modern = {
+        "1": 2001, "2": 2002, "3": 2003, "4": 2004, "5": 2005,
+        "6": 2006, "7": 2007, "8": 2008, "9": 2009,
+        "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014,
+        "F": 2015, "G": 2016, "H": 2017, "J": 2018, "K": 2019,
+        "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024,
+        "S": 2025, "T": 2026, "V": 2027, "W": 2028, "X": 2029,
+        "Y": 2030,
     }
-    digits = {str(i): (2000+i, 2030+i) for i in range(1,10)}
-    pair = letters.get(code) or digits.get(code)
-    if not pair:
-        return []
-    # If position 7 is a letter, use the later cycle; if it is a digit, use
-    # the earlier cycle. This is the convention documented by the open WMI DB.
-    if code.isalpha():
-        return [pair[1] if p7.isalpha() else pair[0]]
-    return [pair[1] if p7.isalpha() else pair[0]]
+
+    old = {
+        "1": 1971, "2": 1972, "3": 1973, "4": 1974, "5": 1975,
+        "6": 1976, "7": 1977, "8": 1978, "9": 1979,
+        "A": 1980, "B": 1981, "C": 1982, "D": 1983, "E": 1984,
+        "F": 1985, "G": 1986, "H": 1987, "J": 1988, "K": 1989,
+        "L": 1990, "M": 1991, "N": 1992, "P": 1993, "R": 1994,
+        "S": 1995, "T": 1996, "V": 1997, "W": 1998, "X": 1999,
+        "Y": 2000,
+    }
+
+    # Volkswagen Group European WMI: modern cycle takes priority.
+    if wmi.startswith("WV") and code in modern:
+        return [modern[code]]
+
+    if code in modern:
+        return [modern[code]]
+    if code in old:
+        return [old[code]]
+    return []
 
 def country_for(wmi2):
     for lo,hi,country in COUNTRY_RANGES:
         if lo <= wmi2 <= hi:
             return country
     return None
+
+def powertrain_for(vin, manufacturer=None, model=None, year=None):
+    """
+    Return only manufacturer-specific engine/gearbox/drive data that is
+    backed by an open documented rule. Unknown values remain None.
+    """
+    return {"engine": None, "transmission": None, "drive": None}
 
 def decode(vin):
     vin = re.sub(r"[\s-]", "", vin.upper())

@@ -29,3 +29,12 @@ Environment:
 - NHTSA vPIC: https://vpic.nhtsa.dot.gov/api/
 - Open vehicle dataset: https://github.com/vehiclesdb/vehiclesdb
 - Cross-reference seed was assembled from public cross-reference pages used only as verification references; it is not presented as a complete catalog.
+
+## v6
+- Исправлен модельный год для современных Volkswagen: `WV...` + код `C` → 2012.
+- В VIN-ответ добавлены поля двигателя, коробки и привода.
+- Если открытые данные не позволяют определить силовую часть надёжно, бот показывает «Не определён по VIN», а не угадывает.
+
+
+## v7
+Telegram polling теперь запускается внутри FastAPI-процесса через async lifecycle. Отдельный subprocess для bot.py удалён, чтобы Render не оставлял второй getUpdates-процесс и Telegram Conflict.

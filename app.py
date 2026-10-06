@@ -1,4 +1,4 @@
-import os, subprocess, sys, sqlite3, re
+import os, sqlite3, re
 from pathlib import Path
 import httpx
 from fastapi import FastAPI, Query
@@ -13,7 +13,6 @@ OLD_DB = DATA / "parts.db"
 OPEN_DB_URL = "https://github.com/Sepehrmasihpour/car-parts/raw/refs/heads/master/car-pwa/public/carparts.db"
 
 app = FastAPI(title="Parts AI Bot — EU Free Data")
-_bot_process = None
 
 def db_ready():
     return DB.exists() and DB.stat().st_size > 10000
@@ -34,22 +33,19 @@ async def ensure_open_db():
         print("Не удалось загрузить открытую БД:", e)
         if tmp.exists(): tmp.unlink(missing_ok=True)
 
-def start_bot():
-    global _bot_process
-    if not os.getenv("TELEGRAM_BOT_TOKEN"):
-        return
-    _bot_process = subprocess.Popen([sys.executable, "bot.py"], env=os.environ.copy())
-
 @app.on_event("startup")
 async def startup():
     await ensure_open_db()
     init_cross_db()
-    start_bot()
+    # Run Telegram polling inside the same process as FastAPI.
+    # This prevents orphaned/duplicate polling processes after Render restarts.
+    from bot import start_telegram
+    await start_telegram()
 
 @app.on_event("shutdown")
 async def shutdown():
-    if _bot_process and _bot_process.poll() is None:
-        _bot_process.terminate()
+    from bot import stop_telegram
+    await stop_telegram()
 
 @app.get("/")
 def root():
